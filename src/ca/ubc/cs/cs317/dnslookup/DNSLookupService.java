@@ -2,9 +2,11 @@ package ca.ubc.cs.cs317.dnslookup;
 
 import java.io.Console;
 import java.net.DatagramSocket;
+import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.io.IOException;
 import java.util.*;
 
 public class DNSLookupService {
@@ -19,6 +21,8 @@ public class DNSLookupService {
     private static DNSCache cache = DNSCache.getInstance();
 
     private static Random random = new Random();
+    private static int[] generatedQueryIDs = new int[65536];
+    private static int totalQueryCount = 0;
 
     /**
      * Main function, called when program is first invoked.
@@ -175,9 +179,132 @@ public class DNSLookupService {
             return Collections.emptySet();
         }
 
-        // TODO To be completed by the student
+        Set<ResourceRecord> cachedResults = cache.getCachedResults(node);
+        if (cachedResults.isEmpty()) {
+          retrieveResultsFromServer(node, rootServer);
+          return cachedResults;
+          //getResults(node, indirectionLevel + 1)
+        } else {
+          return cachedResults;
+        }
+    }
 
-        return cache.getCachedResults(node);
+    private static byte[] encodeQuery(int queryID, DNSNode node) {
+        byte[] queryBuffer = new byte[512];
+        int thirdBit = queryID >>> 8;
+        int forthBit = queryID & 0xffffff;
+        queryBuffer[0] = (byte) thirdBit;
+        queryBuffer[1] = (byte) forthBit;
+        int QROpcodeAATCRD = 0;
+        queryBuffer[2] = (byte) QROpcodeAATCRD;
+        int RAZRCODE = 0;
+        queryBuffer[3] = (byte) RAZRCODE;
+        int QDCOUNT = 1;
+        queryBuffer[4] = (byte) 0;
+        queryBuffer[5] = (byte) QDCOUNT;
+        int ANCOUNT = 0;
+        queryBuffer[6] = (byte) 0;
+        queryBuffer[7] = (byte) ANCOUNT;
+        int NSCOUNT = 0;
+        queryBuffer[8] = (byte) 0;
+        queryBuffer[9] = (byte) NSCOUNT;
+        int ARCOUNT = 0;
+        queryBuffer[10] = (byte) 0;
+        queryBuffer[11] = (byte) ARCOUNT;
+        int pointer = 12;
+        String[] labels = node.getHostName().split("\\.");
+        for (int i = 0 ; i < labels.length; i++) {
+            String label = labels[i];
+            queryBuffer[pointer++] = (byte) label.length();
+            for (char c : label.toCharArray()) {
+                queryBuffer[pointer++] = (byte) ((int) c);
+            }
+        }
+        queryBuffer[pointer++] = (byte) 0; //end of QNAME
+        int QTYPE = node.getType().getCode();
+        queryBuffer[pointer++] = (byte) 0;
+        queryBuffer[pointer++] = (byte) QTYPE;
+        int QCLASS = 1; // always Internet(IN)
+        queryBuffer[pointer++] = (byte) 0;
+        queryBuffer[pointer++] = (byte) QCLASS;
+        return Arrays.copyOfRange(queryBuffer, 0, pointer);
+    }
+
+    private static int getIntFromTwoBytes(byte b1, byte b2) {
+        return ((b1 & 0xFF) << 8) + (b2 & 0xFF);
+    }
+
+    private static void decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
+        int receivedQueryID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
+
+        if (queryID != receivedQueryID) {
+            System.out.println("FAILED. Response does not have same query ID.");
+            return;
+        }
+
+        System.out.println("OK. Correst response is received.");
+        int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
+        int opCode = (responseBuffer[2] & 0x78) >>> 3; // get 2nd, 3rd, 4th and 5th bit
+        int AA = (responseBuffer[2] & 0x04) >>> 2; // geth 6th
+        int TC = (responseBuffer[2] & 0x02) >>> 1; // get 7th bit
+        int RD = responseBuffer[2] & 0x01; // get 8th bit
+        if (QR != 1) {
+            System.out.println("FAILED. Received datagram is not response");
+            return;
+        }
+        System.out.println("OK. Received datagram is response.");
+
+        int RCODE = responseBuffer[3] & 0x0F;
+        String message = "";
+        boolean process = false;
+        switch (RCODE) {
+            case 0: message = "OK. No error on RCODE";
+                    process = true;
+                    break;
+            case 1: message = "FAILED. Format error, name server didn't understand query";
+                    break;
+            case 2: message = "FAILED. Server error";
+                    break;
+            case 3: message = "FAILED. Name error – the name doesn't exist";
+                    break;
+            case 4: message = "FAILED. Support for query not implemented";
+                    break;
+            case 5: message = "FAILED. Request refused";
+                    break;
+            default: message = "FAILED. Unknown RCODE";
+                    break;
+        }
+        System.out.println(message);
+        if (!process) {
+            return;
+        }
+        int QDCOUNT = getIntFromTwoBytes(responseBuffer[4], responseBuffer[5]);
+        System.out.println("OK. Received QDCOUNT is " + QDCOUNT);
+        int ANCOUNT = getIntFromTwoBytes(responseBuffer[6], responseBuffer[7]);
+        System.out.println("OK. Received ANCOUNT is " + ANCOUNT);
+        int NSCOUNT = getIntFromTwoBytes(responseBuffer[8], responseBuffer[9]);
+        System.out.println("OK. Received NSCOUNT is " + NSCOUNT);
+        int ARCOUNT = getIntFromTwoBytes(responseBuffer[10], responseBuffer[11]);
+        System.out.println("OK. Received ARCOUNT is " + ARCOUNT);
+        int pointer = 12;
+        String receivedQNAME = "";
+        while(true) {
+            int labelLength = responseBuffer[pointer++] & 0xFF;
+            if (labelLength == 0)
+                break;
+            for (int i = 0; i < labelLength; i++) {
+                char ch = (char) (responseBuffer[pointer++] & 0xFF);
+                receivedQNAME += ch;
+            }
+            receivedQNAME += '.';
+        }
+        receivedQNAME = receivedQNAME.substring(0, receivedQNAME.length() - 1);
+        if (!node.getHostName().equals(receivedQNAME)) {
+            System.out.println("FAILED. Received QNAME is different than sent hostname. Received: " + receivedQNAME);
+            return;
+        }
+        System.out.println("OK. Received same QNAME with sent hostname.");
+
     }
 
     /**
@@ -189,8 +316,36 @@ public class DNSLookupService {
      * @param server Address of the server to be used for the query.
      */
     private static void retrieveResultsFromServer(DNSNode node, InetAddress server) {
+      int queryID = getNewUniqueQueryID();
+      byte[] queryBuffer = encodeQuery(queryID, node);
+      System.out.print("Encoded Query: ");
+      printBufferHexDump(queryBuffer);
 
-        // TODO To be completed by the student
+      DatagramPacket queryPacket = new DatagramPacket(queryBuffer, queryBuffer.length, server, DEFAULT_DNS_PORT);
+      try {
+          socket.send(queryPacket);
+      } catch (IOException e) {
+          System.out.println("FAILED. IOException during sending datagram.");
+      }
+
+      byte[] responseBuffer = new byte[1024];
+      DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
+      try {
+          socket.receive(responsePacket);
+          System.out.print("Received Response: ");
+          printBufferHexDump(responseBuffer);
+          decodeResponse(queryID, node, responseBuffer);
+      } catch (IOException e) {
+          System.out.println("FAILED. IOException during receiving datagram.");
+      }
+    }
+
+
+    private static void printBufferHexDump(byte[] buffer) {
+        for (int x = 0 ; x < buffer.length; x++) {
+            System.out.print(String.format("%02x ", buffer[x]));
+        }
+        System.out.println();
     }
 
     private static void verbosePrintResourceRecord(ResourceRecord record, int rtype) {
@@ -215,5 +370,20 @@ public class DNSLookupService {
             System.out.printf("%-30s %-5s %-8d %s\n", node.getHostName(),
                     node.getType(), record.getTTL(), record.getTextResult());
         }
+    }
+
+    /**
+    * Returns a new and unique query ID
+    */
+    private static int getNewUniqueQueryID() {
+      int next = random.nextInt(65536);
+      for (int i = 0; i < totalQueryCount; i++){
+          if (generatedQueryIDs[i] == next) {
+              return getNewUniqueQueryID();
+          }
+      }
+      generatedQueryIDs[totalQueryCount++] = next;
+      System.out.println("Generated unique ID is " + next);
+      return next;
     }
 }
