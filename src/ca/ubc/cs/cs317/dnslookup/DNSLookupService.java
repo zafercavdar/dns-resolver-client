@@ -195,7 +195,7 @@ public class DNSLookupService {
         int forthBit = queryID & 0xffffff;
         queryBuffer[0] = (byte) thirdBit;
         queryBuffer[1] = (byte) forthBit;
-        int QROpcodeAATCRD = 0;
+        int QROpcodeAATCRD = 0; // 0 iterative, 1 recursive
         queryBuffer[2] = (byte) QROpcodeAATCRD;
         int RAZRCODE = 0;
         queryBuffer[3] = (byte) RAZRCODE;
@@ -234,6 +234,73 @@ public class DNSLookupService {
         return ((b1 & 0xFF) << 8) + (b2 & 0xFF);
     }
 
+    private static int getIntFromFourBytes(byte b1, byte b2, byte b3, byte b4) {
+        return ((b1 & 0xFF) << 24) + ((b2 & 0xFF) << 16) + ((b3 & 0xFF) << 8) + (b4 & 0xFF);
+    }
+
+    private static String getNameFromPointer(byte[] buffer, int ptr){
+        String name = "";
+        while(true) {
+            int labelLength = buffer[ptr++] & 0xFF;
+            if (labelLength == 0)
+                break;
+            else if (labelLength == 192) { // compressed data, recursive call
+                int newPtr = (buffer[ptr++] & 0xFF);
+                name += getNameFromPointer(buffer, newPtr);
+                break;
+            }
+            else {
+                for (int i = 0; i < labelLength; i++) {
+                    char ch = (char) (buffer[ptr++] & 0xFF);
+                    name += ch;
+                }
+                name += '.';
+            }
+        }
+        return name;
+    }
+
+    private static int decodeSingleRecord(byte[] responseBuffer, int pointer){
+        int c0 = (responseBuffer[pointer++] & 0xFF);
+        if (c0 == 192) { // Compressed data
+            int hostNamePointer = (responseBuffer[pointer++] & 0xFF);
+            String hostName = getNameFromPointer(responseBuffer, hostNamePointer);
+            int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+            int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+            int TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
+            int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+            if (typeCode == 1) { // A IPv4
+                String address = "";
+                for (int j = 0; j < RDATALength; j++) {
+                    int octet = responseBuffer[pointer++] & 0xFF;
+                    address += octet + ".";
+                }
+                address = address.substring(0, address.length() - 1);
+                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), address);
+            }
+            else if (typeCode == 28) { // AAAA IPv6
+                String address = "";
+                for (int j = 0; j < RDATALength / 2; j++) {
+                    int octet = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+                    String hex = Integer.toHexString(octet);
+                    address += hex + ":";
+                }
+                address = address.substring(0, address.length() - 1);
+                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), address);
+            } else if (typeCode == 2) { // NS
+                String data = getNameFromPointer(responseBuffer, pointer);
+                pointer += RDATALength;  // move pointer length of r-data times
+                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), data);
+            }
+            else {
+                System.out.println("Need to handle type's other than A and AAAA!");
+            }
+        } else {
+            System.out.println("FAILED. c0 is expected. Check your pointers!");
+        }
+        return pointer;
+    }
+
     private static void decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
         int receivedQueryID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
 
@@ -242,7 +309,7 @@ public class DNSLookupService {
             return;
         }
 
-        System.out.println("OK. Correst response is received.");
+        System.out.println("OK. Response has same query ID.");
         int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
         int opCode = (responseBuffer[2] & 0x78) >>> 3; // get 2nd, 3rd, 4th and 5th bit
         int AA = (responseBuffer[2] & 0x04) >>> 2; // geth 6th
@@ -253,7 +320,10 @@ public class DNSLookupService {
             return;
         }
         System.out.println("OK. Received datagram is response.");
-
+        int RA = responseBuffer[3] & 0x80;
+        if (RA == 0 && RD == 1) {
+            System.out.println("FAILED. Server is not capable of recursive queries.");
+        }
         int RCODE = responseBuffer[3] & 0x0F;
         String message = "";
         boolean process = false;
@@ -304,7 +374,27 @@ public class DNSLookupService {
             return;
         }
         System.out.println("OK. Received same QNAME with sent hostname.");
-
+        int QTYPE = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+        System.out.println("OK. Received QTYPE code is " + QTYPE + " Type is " + RecordType.getByCode(QTYPE));
+        int QCLASS = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+        if (QCLASS == 1) {
+            System.out.println("OK. Received QCLASS code is " + QCLASS + " It's IN(ternet)");
+        } else {
+            System.out.println("FAILED. Received QCLASS code is " + QCLASS + " It's not IN(ternet)");
+            return;
+        }
+        System.out.println(";; ANSWER SECTION:");
+        for (int i=0; i < ANCOUNT; i++) {
+            pointer = decodeSingleRecord(responseBuffer, pointer);
+        }
+        System.out.println(";; AUTHORITY SECTION:");
+        for (int i=0; i < NSCOUNT; i++) {
+            pointer = decodeSingleRecord(responseBuffer, pointer);
+        }
+        System.out.println(";; ADDITIONAL SECTION:");
+        for (int i=0; i < ARCOUNT; i++) {
+            pointer = decodeSingleRecord(responseBuffer, pointer);
+        }
     }
 
     /**
