@@ -293,7 +293,7 @@ public class DNSLookupService {
                 System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), data);
             }
             else {
-                System.out.println("Need to handle type's other than A and AAAA!");
+                System.out.println("Need to handle type's other than A, AAAA and NS!");
             }
         } else {
             System.out.println("FAILED. c0 is expected. Check your pointers!");
