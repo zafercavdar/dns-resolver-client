@@ -266,7 +266,7 @@ public class DNSLookupService {
         return ((b1 & 0xFF) << 24) + ((b2 & 0xFF) << 16) + ((b3 & 0xFF) << 8) + (b4 & 0xFF);
     }
 
-    private static String getNameFromPointer(byte[] buffer, int ptr, boolean updateGlobalPointer){
+    private static String getNameFromPointer(byte[] buffer, int ptr){
         String name = "";
         while(true) {
             int labelLength = buffer[ptr++] & 0xFF;
@@ -274,7 +274,7 @@ public class DNSLookupService {
                 break;
             else if (labelLength >= 192) { // compressed data, recursive call
                 int newPtr = (buffer[ptr++] & 0xFF) + 256 * (labelLength - 192);
-                name += getNameFromPointer(buffer, newPtr, false);
+                name += getNameFromPointer(buffer, newPtr);
                 break;
             }
             else {
@@ -285,9 +285,8 @@ public class DNSLookupService {
                 name += '.';
             }
         }
-        if (updateGlobalPointer){
-            pointer = ptr;
-        }
+
+        pointer = ptr;
         if (name.length() > 0 && name.charAt(name.length() - 1) == '.') {
             name = name.substring(0, name.length() - 1);
         }
@@ -296,7 +295,7 @@ public class DNSLookupService {
 
     private static ResourceRecord decodeSingleRecord(byte[] responseBuffer, boolean cacheRecord){
         ResourceRecord record = null;
-        String hostName = getNameFromPointer(responseBuffer, pointer, true);
+        String hostName = getNameFromPointer(responseBuffer, pointer);
         int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
         int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
         long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
@@ -334,14 +333,12 @@ public class DNSLookupService {
                 System.out.println("FAILED, cannot getByName address");
             }
         } else if (typeCode == 2 || typeCode == 5 || typeCode == 6) { // NS or CNAME or SOA
-            String data = getNameFromPointer(responseBuffer, pointer, false);
-            pointer += RDATALength;  // move pointer length of r-data times
+            String data = getNameFromPointer(responseBuffer, pointer);
             record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
             verbosePrintResourceRecord(record, 0);
         }
         else {
-            String data = getNameFromPointer(responseBuffer, pointer, false);
-            pointer += RDATALength;  // move pointer length of r-data times
+            String data = getNameFromPointer(responseBuffer, pointer);
             record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
             verbosePrintResourceRecord(record, 0);
         }
