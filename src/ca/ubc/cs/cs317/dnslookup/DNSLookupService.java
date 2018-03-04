@@ -219,10 +219,10 @@ public class DNSLookupService {
 
     private static byte[] encodeQuery(int queryID, DNSNode node) {
         byte[] queryBuffer = new byte[512];
-        int thirdBit = queryID >>> 8;
-        int forthBit = queryID & 0xffffff;
-        queryBuffer[0] = (byte) thirdBit;
-        queryBuffer[1] = (byte) forthBit;
+        int thirdByte = queryID >>> 8;
+        int forthByte = queryID & 0xff;
+        queryBuffer[0] = (byte) thirdByte;
+        queryBuffer[1] = (byte) forthByte;
         int QROpcodeAATCRD = 0; // 0 iterative, 1 recursive
         queryBuffer[2] = (byte) QROpcodeAATCRD;
         int RAZRCODE = 0;
