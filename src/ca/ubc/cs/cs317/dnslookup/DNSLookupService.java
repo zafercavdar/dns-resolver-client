@@ -266,15 +266,15 @@ public class DNSLookupService {
         return ((b1 & 0xFF) << 24) + ((b2 & 0xFF) << 16) + ((b3 & 0xFF) << 8) + (b4 & 0xFF);
     }
 
-    private static String getNameFromPointer(byte[] buffer, int ptr){
+    private static String getNameFromPointer(byte[] buffer, int ptr, boolean updateGlobalPointer){
         String name = "";
         while(true) {
             int labelLength = buffer[ptr++] & 0xFF;
             if (labelLength == 0)
                 break;
-            else if (labelLength == 192) { // compressed data, recursive call
-                int newPtr = (buffer[ptr++] & 0xFF);
-                name += getNameFromPointer(buffer, newPtr);
+            else if (labelLength >= 192) { // compressed data, recursive call
+                int newPtr = (buffer[ptr++] & 0xFF) + 256 * (labelLength - 192);
+                name += getNameFromPointer(buffer, newPtr, false);
                 break;
             }
             else {
@@ -285,67 +285,69 @@ public class DNSLookupService {
                 name += '.';
             }
         }
-        return name.substring(0, name.length() - 1);
+        if (updateGlobalPointer){
+            pointer = ptr;
+        }
+        if (name.length() > 0 && name.charAt(name.length() - 1) == '.') {
+            name = name.substring(0, name.length() - 1);
+        }
+        return name;
     }
 
     private static ResourceRecord decodeSingleRecord(byte[] responseBuffer, boolean cacheRecord){
-        int firtByte = (responseBuffer[pointer++] & 0xFF);
         ResourceRecord record = null;
-        if (firtByte == 192) { // Compressed data
-            int hostNamePointer = (responseBuffer[pointer++] & 0xFF);
-            String hostName = getNameFromPointer(responseBuffer, hostNamePointer);
-            int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-            int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-            long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
-            int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-            if (typeCode == 1) { // A IPv4
-                String address = "";
-                for (int j = 0; j < RDATALength; j++) {
-                    int octet = responseBuffer[pointer++] & 0xFF;
-                    address += octet + ".";
-                }
-                address = address.substring(0, address.length() - 1);
-                InetAddress addr = null;
-                try {
-                    addr = InetAddress.getByName(address);
-                    record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
-                    verbosePrintResourceRecord(record, 0);
-                } catch (UnknownHostException e){
-                    System.out.println("FAILED, cannot getByName address");
-                }
+        String hostName = getNameFromPointer(responseBuffer, pointer, true);
+        int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+        int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+        long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
+        int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+        if (typeCode == 1) { // A IPv4
+            String address = "";
+            for (int j = 0; j < RDATALength; j++) {
+                int octet = responseBuffer[pointer++] & 0xFF;
+                address += octet + ".";
             }
-            else if (typeCode == 28) { // AAAA IPv6
-                String address = "";
-                for (int j = 0; j < RDATALength / 2; j++) {
-                    int octet = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-                    String hex = Integer.toHexString(octet);
-                    address += hex + ":";
-                }
-                address = address.substring(0, address.length() - 1);
-                InetAddress addr = null;
-                try {
-                    addr = InetAddress.getByName(address);
-                    record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
-                    verbosePrintResourceRecord(record, 0);
-                } catch (UnknownHostException e){
-                    System.out.println("FAILED, cannot getByName address");
-                }
-            } else if (typeCode == 2 || typeCode == 5 || typeCode == 6) { // NS or CNAME or SOA
-                String data = getNameFromPointer(responseBuffer, pointer);
-                pointer += RDATALength;  // move pointer length of r-data times
-                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+            address = address.substring(0, address.length() - 1);
+            InetAddress addr = null;
+            try {
+                addr = InetAddress.getByName(address);
+                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
                 verbosePrintResourceRecord(record, 0);
+            } catch (UnknownHostException e){
+                System.out.println("FAILED, cannot getByName address");
             }
-            else {
-                String data = getNameFromPointer(responseBuffer, pointer);
-                pointer += RDATALength;  // move pointer length of r-data times
-                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+        }
+        else if (typeCode == 28) { // AAAA IPv6
+            String address = "";
+            for (int j = 0; j < RDATALength / 2; j++) {
+                int octet = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+                String hex = Integer.toHexString(octet);
+                address += hex + ":";
+            }
+            address = address.substring(0, address.length() - 1);
+            InetAddress addr = null;
+            try {
+                addr = InetAddress.getByName(address);
+                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
                 verbosePrintResourceRecord(record, 0);
+            } catch (UnknownHostException e){
+                System.out.println("FAILED, cannot getByName address");
             }
+        } else if (typeCode == 2 || typeCode == 5 || typeCode == 6) { // NS or CNAME or SOA
+            String data = getNameFromPointer(responseBuffer, pointer, false);
+            pointer += RDATALength;  // move pointer length of r-data times
+            record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+            verbosePrintResourceRecord(record, 0);
+        }
+        else {
+            String data = getNameFromPointer(responseBuffer, pointer, false);
+            pointer += RDATALength;  // move pointer length of r-data times
+            record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+            verbosePrintResourceRecord(record, 0);
+        }
 
-            if (cacheRecord) {
-                cache.addResult(record);
-            }
+        if (cacheRecord) {
+            cache.addResult(record);
         }
         return record;
     }
