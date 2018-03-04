@@ -350,9 +350,9 @@ public class DNSLookupService {
     }
 
     private static ArrayList<ResourceRecord> decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
-        int receivedQueryID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
+        int responseID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
 
-        if (queryID != receivedQueryID) {
+        if (queryID != responseID) {
             System.out.println("FAILED. Response does not have same query ID.");
             return null;
         }
@@ -369,7 +369,7 @@ public class DNSLookupService {
         }
 
         if (verboseTracing)
-            System.out.println("Response ID: " + receivedQueryID + " Authoritative = " + (AA == 1));
+            System.out.println("Response ID: " + responseID + " Authoritative = " + (AA == 1));
 
         //System.out.println("OK. Received datagram is response.");
         int RA = responseBuffer[3] & 0x80;
