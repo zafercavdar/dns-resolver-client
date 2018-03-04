@@ -196,10 +196,12 @@ public class DNSLookupService {
             cachedResults = cache.getCachedResults(cnameNode);
             if (cachedResults.isEmpty()){
                 // We don't have CNAME in cache
-                nameServer = retrieveResultsFromServer(node, nameServer);
-                cachedResults = cache.getCachedResults(node); // update cache results
-                if (!cachedResults.isEmpty()){
-                    return cachedResults;
+                if (nameServer != null) {
+                    nameServer = retrieveResultsFromServer(node, nameServer);
+                    cachedResults = cache.getCachedResults(node); // update cache results
+                    if (!cachedResults.isEmpty()){
+                        return cachedResults;
+                    }
                 }
             } else {
                 // start new query with CNAME and node's type
@@ -287,9 +289,9 @@ public class DNSLookupService {
     }
 
     private static ResourceRecord decodeSingleRecord(byte[] responseBuffer, boolean cacheRecord){
-        int c0 = (responseBuffer[pointer++] & 0xFF);
+        int firtByte = (responseBuffer[pointer++] & 0xFF);
         ResourceRecord record = null;
-        if (c0 == 192) { // Compressed data
+        if (firtByte == 192) { // Compressed data
             int hostNamePointer = (responseBuffer[pointer++] & 0xFF);
             String hostName = getNameFromPointer(responseBuffer, hostNamePointer);
             int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
@@ -328,12 +330,7 @@ public class DNSLookupService {
                 } catch (UnknownHostException e){
                     System.out.println("FAILED, cannot getByName address");
                 }
-            } else if (typeCode == 2) { // NS
-                String data = getNameFromPointer(responseBuffer, pointer);
-                pointer += RDATALength;  // move pointer length of r-data times
-                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
-                verbosePrintResourceRecord(record, 0);
-            } else if (typeCode == 5) { // CNAME
+            } else if (typeCode == 2 || typeCode == 5 || typeCode == 6) { // NS or CNAME or SOA
                 String data = getNameFromPointer(responseBuffer, pointer);
                 pointer += RDATALength;  // move pointer length of r-data times
                 record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
@@ -349,11 +346,7 @@ public class DNSLookupService {
             if (cacheRecord) {
                 cache.addResult(record);
             }
-        } else {
-            System.out.println(Integer.toHexString(responseBuffer[pointer] & 0xFF));
-            System.out.println("FAILED. c0 is expected. Check your pointers!");
         }
-
         return record;
     }
 
@@ -525,7 +518,7 @@ public class DNSLookupService {
               //System.out.print("Received Response: ");
               //printBufferHexDump(responseBuffer);
               ArrayList<ResourceRecord> authNameServers = decodeResponse(queryID, node, responseBuffer);
-              if (authNameServers == null) {
+              if (authNameServers == null || authNameServers.isEmpty()) {
                   return null;
               } else {
                   ResourceRecord firstNameServer = authNameServers.get(0);
