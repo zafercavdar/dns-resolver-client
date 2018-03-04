@@ -188,15 +188,31 @@ public class DNSLookupService {
             return cachedResults;
         }
 
-        while(true){
-            nameServer = retrieveResultsFromServer(node, nameServer);
-            cachedResults = cache.getCachedResults(node); // update cache results
-            if (cachedResults.isEmpty() && nameServer == null) {
-                return Collections.emptySet();
-            } else if (!cachedResults.isEmpty()){
-                return cachedResults;
+        DNSNode cnameNode = new DNSNode(node.getHostName(), RecordType.getByCode(5));
+
+        // At most, make 20 iterations
+        for(int i = 0; i < 20; i++){
+            // maybe we have CNAME in the cache?
+            cachedResults = cache.getCachedResults(cnameNode);
+            if (cachedResults.isEmpty()){
+                // We don't have CNAME in cache
+                nameServer = retrieveResultsFromServer(node, nameServer);
+                cachedResults = cache.getCachedResults(node); // update cache results
+                if (!cachedResults.isEmpty()){
+                    return cachedResults;
+                }
+            } else {
+                // start new query with CNAME and node's type
+                Set<ResourceRecord> allResults = new HashSet<ResourceRecord>();
+                for (ResourceRecord cnameRecord : cachedResults){
+                    DNSNode newNode = new DNSNode(cnameRecord.getTextResult(), node.getType());
+                    allResults.addAll(getResults(newNode, indirectionLevel + 1));
+                }
+                return allResults;
             }
         }
+
+        return Collections.emptySet();
     }
 
     private static byte[] encodeQuery(int queryID, DNSNode node) {
@@ -280,7 +296,6 @@ public class DNSLookupService {
             int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
             long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
             int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-            boolean cacheable = true;
             if (typeCode == 1) { // A IPv4
                 String address = "";
                 for (int j = 0; j < RDATALength; j++) {
@@ -325,18 +340,13 @@ public class DNSLookupService {
                 verbosePrintResourceRecord(record, 0);
             }
             else {
-                cacheable = false;
-                // we need to skip here
-                // assume that next record starts with c0 = 192
-                // what if there is no next record??? - limit searching with 100
-                System.out.println("FAILED. Need to handle type: " + typeCode);
                 String data = getNameFromPointer(responseBuffer, pointer);
                 pointer += RDATALength;  // move pointer length of r-data times
                 record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
                 verbosePrintResourceRecord(record, 0);
             }
 
-            if (cacheable && cacheRecord) {
+            if (cacheRecord) {
                 cache.addResult(record);
             }
         } else {
@@ -373,10 +383,8 @@ public class DNSLookupService {
         int RA = responseBuffer[3] & 0x80;
         int RCODE = responseBuffer[3] & 0x0F;
         String message = "";
-        boolean process = false;
         switch (RCODE) {
             case 0: message = "OK. No error on RCODE";
-                    process = true;
                     break;
             case 1: message = "FAILED. Format error, name server didn't understand query";
                     break;
@@ -391,10 +399,7 @@ public class DNSLookupService {
             default: message = "FAILED. Unknown RCODE";
                     break;
         }
-        if (!process) {
-            System.out.println(message);
-            //return null;
-        }
+
         int QDCOUNT = getIntFromTwoBytes(responseBuffer[4], responseBuffer[5]);
         int ANCOUNT = getIntFromTwoBytes(responseBuffer[6], responseBuffer[7]);
         int NSCOUNT = getIntFromTwoBytes(responseBuffer[8], responseBuffer[9]);
@@ -468,7 +473,19 @@ public class DNSLookupService {
                     }
                 }
             }
-            return authNameServers;
+            if (authNameServers.isEmpty()){
+                for (ResourceRecord nameserver: nameServers) {
+                    String name = nameserver.getTextResult();
+                    // search for nameserver A record
+                    DNSNode nsServerNode = new DNSNode(name, RecordType.getByCode(1));
+                    Set<ResourceRecord> newResults = getResults(nsServerNode, 0);
+                    if (!newResults.isEmpty()){
+                        authNameServers.addAll(newResults);
+                        break;
+                    }
+                }
+            }
+            return authNameServers; // If none of `getResults` returns a non-empty list, HARDCORE FAIL
         }
     }
 
