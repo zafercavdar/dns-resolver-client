@@ -190,15 +190,16 @@ public class DNSLookupService {
 
     DNSNode cnameNode = new DNSNode(node.getHostName(), RecordType.getByCode(5));
 
-    // At most, make 20 iterations
+    // Max 20 iterations
     for(int i = 0; i < 20; i++){
-      // maybe we have CNAME in the cache?
+      // Check if we have CNAME in the cache
       cachedResults = cache.getCachedResults(cnameNode);
       if (cachedResults.isEmpty()){
         // We don't have CNAME in cache
         if (nameServer != null) {
           nameServer = retrieveResultsFromServer(node, nameServer);
-          cachedResults = cache.getCachedResults(node); // update cache results
+          // update cache results
+          cachedResults = cache.getCachedResults(node);
           if (!cachedResults.isEmpty()){
             return cachedResults;
           }
@@ -217,6 +218,9 @@ public class DNSLookupService {
     return Collections.emptySet();
   }
 
+  /**
+  Method to encode query as a message in the domain protocol
+  **/
   private static byte[] encodeQuery(int queryID, DNSNode node) {
     byte[] queryBuffer = new byte[512];
     int thirdByte = queryID >>> 8;
@@ -272,11 +276,13 @@ public class DNSLookupService {
       int labelLength = buffer[ptr++] & 0xFF;
       if (labelLength == 0)
         break;
-      else if (labelLength >= 192) { // compressed data, recursive call
+      // Identify message compression used, recursive call to retrieve name
+      else if (labelLength >= 192) {
         int newPtr = (buffer[ptr++] & 0xFF) + 256 * (labelLength - 192);
         name += getNameFromPointer(buffer, newPtr);
         break;
       }
+      // standard function to decode encoded name
       else {
         for (int i = 0; i < labelLength; i++) {
           char ch = (char) (buffer[ptr++] & 0xFF);
@@ -349,6 +355,9 @@ public class DNSLookupService {
     return record;
   }
 
+  /**
+  Method to decode response provided by DNS Server
+  **/
   private static ArrayList<ResourceRecord> decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
     int responseID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
 
@@ -357,12 +366,12 @@ public class DNSLookupService {
       return null;
     }
 
-    //System.out.println("OK. Response has same query ID.");
     int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
     int opCode = (responseBuffer[2] & 0x78) >>> 3; // get 2nd, 3rd, 4th and 5th bit
     int AA = (responseBuffer[2] & 0x04) >>> 2; // geth 6th
     int TC = (responseBuffer[2] & 0x02) >>> 1; // get 7th bit
     int RD = responseBuffer[2] & 0x01; // get 8th bit
+
     if (QR != 1) {
       System.out.println("FAILED. Received datagram is not response");
       return null;
@@ -371,7 +380,6 @@ public class DNSLookupService {
     if (verboseTracing)
       System.out.println("Response ID: " + responseID + " Authoritative = " + (AA == 1));
 
-    //System.out.println("OK. Received datagram is response.");
     int RA = responseBuffer[3] & 0x80;
     int RCODE = responseBuffer[3] & 0x0F;
     String message = "";
@@ -413,13 +421,9 @@ public class DNSLookupService {
       System.out.println("FAILED. Received QNAME is different than sent hostname. Received: " + receivedQNAME);
       return null;
     }
-    //System.out.println("OK. Received same QNAME with sent hostname.");
     int QTYPE = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-    //System.out.println("OK. Received QTYPE code is " + QTYPE + " Type is " + RecordType.getByCode(QTYPE));
     int QCLASS = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-    if (QCLASS == 1) {
-      //System.out.println("OK. Received QCLASS code is " + QCLASS + " It's IN(ternet)");
-    } else {
+    if (QCLASS != 1) {
       System.out.println("FAILED. Received QCLASS code is " + QCLASS + " It's not IN(ternet)");
       return null;
     }
@@ -500,9 +504,6 @@ public class DNSLookupService {
         System.out.println("Query ID   " + queryID + " " + node.getHostName() + "  " + node.getType() + " --> " + server.getHostAddress());
       }
 
-      //System.out.print("Encoded Query: ");
-      //printBufferHexDump(queryBuffer);
-
       DatagramPacket queryPacket = new DatagramPacket(queryBuffer, queryBuffer.length, server, DEFAULT_DNS_PORT);
       try {
         socket.send(queryPacket);
@@ -514,8 +515,6 @@ public class DNSLookupService {
       DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
       try {
         socket.receive(responsePacket);
-        //System.out.print("Received Response: ");
-        //printBufferHexDump(responseBuffer);
         ArrayList<ResourceRecord> authNameServers = decodeResponse(queryID, node, responseBuffer);
         if (authNameServers == null || authNameServers.isEmpty()) {
           return null;
@@ -575,7 +574,6 @@ public class DNSLookupService {
       }
     }
     generatedQueryIDs[totalQueryCount++] = next;
-    //System.out.println("Generated unique ID is " + next);
     return next;
   }
 }
