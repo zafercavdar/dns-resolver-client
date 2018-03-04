@@ -5,9 +5,11 @@ import java.net.DatagramSocket;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.io.IOException;
 import java.util.*;
+
 
 public class DNSLookupService {
 
@@ -23,6 +25,7 @@ public class DNSLookupService {
     private static Random random = new Random();
     private static int[] generatedQueryIDs = new int[65536];
     private static int totalQueryCount = 0;
+    private static int pointer = 0; // pointer for decoding query
 
     /**
      * Main function, called when program is first invoked.
@@ -173,6 +176,7 @@ public class DNSLookupService {
      * @return A set of resource records corresponding to the specific query requested.
      */
     private static Set<ResourceRecord> getResults(DNSNode node, int indirectionLevel) {
+        InetAddress nameServer = rootServer;
 
         if (indirectionLevel > MAX_INDIRECTION_LEVEL) {
             System.err.println("Maximum number of indirection levels reached.");
@@ -180,12 +184,18 @@ public class DNSLookupService {
         }
 
         Set<ResourceRecord> cachedResults = cache.getCachedResults(node);
-        if (cachedResults.isEmpty()) {
-          retrieveResultsFromServer(node, rootServer);
-          return cachedResults;
-          //getResults(node, indirectionLevel + 1)
-        } else {
-          return cachedResults;
+        if (!cachedResults.isEmpty()){
+            return cachedResults;
+        }
+
+        while(true){
+            nameServer = retrieveResultsFromServer(node, nameServer);
+            cachedResults = cache.getCachedResults(node); // update cache results
+            if (cachedResults.isEmpty() && nameServer == null) {
+                return Collections.emptySet();
+            } else if (!cachedResults.isEmpty()){
+                return cachedResults;
+            }
         }
     }
 
@@ -211,23 +221,23 @@ public class DNSLookupService {
         int ARCOUNT = 0;
         queryBuffer[10] = (byte) 0;
         queryBuffer[11] = (byte) ARCOUNT;
-        int pointer = 12;
+        int ptr = 12;
         String[] labels = node.getHostName().split("\\.");
         for (int i = 0 ; i < labels.length; i++) {
             String label = labels[i];
-            queryBuffer[pointer++] = (byte) label.length();
+            queryBuffer[ptr++] = (byte) label.length();
             for (char c : label.toCharArray()) {
-                queryBuffer[pointer++] = (byte) ((int) c);
+                queryBuffer[ptr++] = (byte) ((int) c);
             }
         }
-        queryBuffer[pointer++] = (byte) 0; //end of QNAME
+        queryBuffer[ptr++] = (byte) 0; //end of QNAME
         int QTYPE = node.getType().getCode();
-        queryBuffer[pointer++] = (byte) 0;
-        queryBuffer[pointer++] = (byte) QTYPE;
+        queryBuffer[ptr++] = (byte) 0;
+        queryBuffer[ptr++] = (byte) QTYPE;
         int QCLASS = 1; // always Internet(IN)
-        queryBuffer[pointer++] = (byte) 0;
-        queryBuffer[pointer++] = (byte) QCLASS;
-        return Arrays.copyOfRange(queryBuffer, 0, pointer);
+        queryBuffer[ptr++] = (byte) 0;
+        queryBuffer[ptr++] = (byte) QCLASS;
+        return Arrays.copyOfRange(queryBuffer, 0, ptr);
     }
 
     private static int getIntFromTwoBytes(byte b1, byte b2) {
@@ -257,18 +267,20 @@ public class DNSLookupService {
                 name += '.';
             }
         }
-        return name;
+        return name.substring(0, name.length() - 1);
     }
 
-    private static int decodeSingleRecord(byte[] responseBuffer, int pointer){
+    private static ResourceRecord decodeSingleRecord(byte[] responseBuffer, boolean cacheRecord){
         int c0 = (responseBuffer[pointer++] & 0xFF);
+        ResourceRecord record = null;
         if (c0 == 192) { // Compressed data
             int hostNamePointer = (responseBuffer[pointer++] & 0xFF);
             String hostName = getNameFromPointer(responseBuffer, hostNamePointer);
             int typeCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
             int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-            int TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
+            long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
             int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+            boolean cacheable = true;
             if (typeCode == 1) { // A IPv4
                 String address = "";
                 for (int j = 0; j < RDATALength; j++) {
@@ -276,7 +288,14 @@ public class DNSLookupService {
                     address += octet + ".";
                 }
                 address = address.substring(0, address.length() - 1);
-                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), address);
+                InetAddress addr = null;
+                try {
+                    addr = InetAddress.getByName(address);
+                    record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
+                    verbosePrintResourceRecord(record, 0);
+                } catch (UnknownHostException e){
+                    System.out.println("FAILED, cannot getByName address");
+                }
             }
             else if (typeCode == 28) { // AAAA IPv6
                 String address = "";
@@ -286,30 +305,57 @@ public class DNSLookupService {
                     address += hex + ":";
                 }
                 address = address.substring(0, address.length() - 1);
-                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), address);
+                InetAddress addr = null;
+                try {
+                    addr = InetAddress.getByName(address);
+                    record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
+                    verbosePrintResourceRecord(record, 0);
+                } catch (UnknownHostException e){
+                    System.out.println("FAILED, cannot getByName address");
+                }
             } else if (typeCode == 2) { // NS
                 String data = getNameFromPointer(responseBuffer, pointer);
                 pointer += RDATALength;  // move pointer length of r-data times
-                System.out.format("       %-30s %-10d %-4s %s\n", hostName, TTL, RecordType.getByCode(typeCode), data);
+                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+                verbosePrintResourceRecord(record, 0);
+            } else if (typeCode == 5) { // CNAME
+                String data = getNameFromPointer(responseBuffer, pointer);
+                pointer += RDATALength;  // move pointer length of r-data times
+                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+                verbosePrintResourceRecord(record, 0);
             }
             else {
-                System.out.println("Need to handle type's other than A, AAAA and NS!");
+                cacheable = false;
+                // we need to skip here
+                // assume that next record starts with c0 = 192
+                // what if there is no next record??? - limit searching with 100
+                System.out.println("FAILED. Need to handle type: " + typeCode);
+                String data = getNameFromPointer(responseBuffer, pointer);
+                pointer += RDATALength;  // move pointer length of r-data times
+                record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
+                verbosePrintResourceRecord(record, 0);
+            }
+
+            if (cacheable && cacheRecord) {
+                cache.addResult(record);
             }
         } else {
+            System.out.println(Integer.toHexString(responseBuffer[pointer] & 0xFF));
             System.out.println("FAILED. c0 is expected. Check your pointers!");
         }
-        return pointer;
+
+        return record;
     }
 
-    private static void decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
+    private static ArrayList<ResourceRecord> decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
         int receivedQueryID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
 
         if (queryID != receivedQueryID) {
             System.out.println("FAILED. Response does not have same query ID.");
-            return;
+            return null;
         }
 
-        System.out.println("OK. Response has same query ID.");
+        //System.out.println("OK. Response has same query ID.");
         int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
         int opCode = (responseBuffer[2] & 0x78) >>> 3; // get 2nd, 3rd, 4th and 5th bit
         int AA = (responseBuffer[2] & 0x04) >>> 2; // geth 6th
@@ -317,13 +363,14 @@ public class DNSLookupService {
         int RD = responseBuffer[2] & 0x01; // get 8th bit
         if (QR != 1) {
             System.out.println("FAILED. Received datagram is not response");
-            return;
+            return null;
         }
-        System.out.println("OK. Received datagram is response.");
+
+        if (verboseTracing)
+            System.out.println("Response ID: " + receivedQueryID + " Authoritative = " + (AA == 1));
+
+        //System.out.println("OK. Received datagram is response.");
         int RA = responseBuffer[3] & 0x80;
-        if (RA == 0 && RD == 1) {
-            System.out.println("FAILED. Server is not capable of recursive queries.");
-        }
         int RCODE = responseBuffer[3] & 0x0F;
         String message = "";
         boolean process = false;
@@ -344,19 +391,15 @@ public class DNSLookupService {
             default: message = "FAILED. Unknown RCODE";
                     break;
         }
-        System.out.println(message);
         if (!process) {
-            return;
+            System.out.println(message);
+            //return null;
         }
         int QDCOUNT = getIntFromTwoBytes(responseBuffer[4], responseBuffer[5]);
-        System.out.println("OK. Received QDCOUNT is " + QDCOUNT);
         int ANCOUNT = getIntFromTwoBytes(responseBuffer[6], responseBuffer[7]);
-        System.out.println("OK. Received ANCOUNT is " + ANCOUNT);
         int NSCOUNT = getIntFromTwoBytes(responseBuffer[8], responseBuffer[9]);
-        System.out.println("OK. Received NSCOUNT is " + NSCOUNT);
         int ARCOUNT = getIntFromTwoBytes(responseBuffer[10], responseBuffer[11]);
-        System.out.println("OK. Received ARCOUNT is " + ARCOUNT);
-        int pointer = 12;
+        pointer = 12;
         String receivedQNAME = "";
         while(true) {
             int labelLength = responseBuffer[pointer++] & 0xFF;
@@ -371,29 +414,61 @@ public class DNSLookupService {
         receivedQNAME = receivedQNAME.substring(0, receivedQNAME.length() - 1);
         if (!node.getHostName().equals(receivedQNAME)) {
             System.out.println("FAILED. Received QNAME is different than sent hostname. Received: " + receivedQNAME);
-            return;
+            return null;
         }
-        System.out.println("OK. Received same QNAME with sent hostname.");
+        //System.out.println("OK. Received same QNAME with sent hostname.");
         int QTYPE = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-        System.out.println("OK. Received QTYPE code is " + QTYPE + " Type is " + RecordType.getByCode(QTYPE));
+        //System.out.println("OK. Received QTYPE code is " + QTYPE + " Type is " + RecordType.getByCode(QTYPE));
         int QCLASS = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
         if (QCLASS == 1) {
-            System.out.println("OK. Received QCLASS code is " + QCLASS + " It's IN(ternet)");
+            //System.out.println("OK. Received QCLASS code is " + QCLASS + " It's IN(ternet)");
         } else {
             System.out.println("FAILED. Received QCLASS code is " + QCLASS + " It's not IN(ternet)");
-            return;
+            return null;
         }
-        System.out.println(";; ANSWER SECTION:");
+
+        ResourceRecord record = null;
+
+        if (verboseTracing)
+            System.out.println("  Answers (" + ANCOUNT + ")");
         for (int i=0; i < ANCOUNT; i++) {
-            pointer = decodeSingleRecord(responseBuffer, pointer);
+            decodeSingleRecord(responseBuffer, true);
         }
-        System.out.println(";; AUTHORITY SECTION:");
+
+        ArrayList<ResourceRecord> nameServers = new ArrayList<ResourceRecord>();
+        if (verboseTracing)
+            System.out.println("  Nameservers (" + NSCOUNT + ")");
         for (int i=0; i < NSCOUNT; i++) {
-            pointer = decodeSingleRecord(responseBuffer, pointer);
+            record = decodeSingleRecord(responseBuffer, false);
+            if (record != null) {
+                nameServers.add(record);
+            }
         }
-        System.out.println(";; ADDITIONAL SECTION:");
+
+        ArrayList<ResourceRecord> additionals = new ArrayList<ResourceRecord>();
+        if (verboseTracing)
+            System.out.println("  Additional Information (" + ARCOUNT + ")");
         for (int i=0; i < ARCOUNT; i++) {
-            pointer = decodeSingleRecord(responseBuffer, pointer);
+            record = decodeSingleRecord(responseBuffer, true);
+            if (record != null) {
+                additionals.add(record);
+            }
+        }
+
+        if (AA == 1){
+            return null;
+        } else { // AA = 0 case
+            ArrayList<ResourceRecord> authNameServers = new ArrayList<ResourceRecord>();
+            for (ResourceRecord nameserver: nameServers) {
+                String name = nameserver.getTextResult();
+                for (ResourceRecord additional: additionals) {
+                    if (additional.getHostName().equals(name) && additional.getType().getCode() == 1){
+                        // A records for name servers
+                        authNameServers.add(additional);
+                    }
+                }
+            }
+            return authNameServers;
         }
     }
 
@@ -405,29 +480,47 @@ public class DNSLookupService {
      * @param node   Host name and record type to be used for the query.
      * @param server Address of the server to be used for the query.
      */
-    private static void retrieveResultsFromServer(DNSNode node, InetAddress server) {
+    private static InetAddress retrieveResultsFromServer(DNSNode node, InetAddress server) {
       int queryID = getNewUniqueQueryID();
       byte[] queryBuffer = encodeQuery(queryID, node);
-      System.out.print("Encoded Query: ");
-      printBufferHexDump(queryBuffer);
+      int timeOutCount = 0;
+      int maxTimeOutCount = 2;
+      while(timeOutCount < maxTimeOutCount) {
+          if (verboseTracing) {
+              System.out.print("\n\n");
+              System.out.println("Query ID     " + queryID + " " + node.getHostName() + "  " + node.getType() + " --> " + server.getHostAddress());
+          }
 
-      DatagramPacket queryPacket = new DatagramPacket(queryBuffer, queryBuffer.length, server, DEFAULT_DNS_PORT);
-      try {
-          socket.send(queryPacket);
-      } catch (IOException e) {
-          System.out.println("FAILED. IOException during sending datagram.");
-      }
+          //System.out.print("Encoded Query: ");
+          //printBufferHexDump(queryBuffer);
 
-      byte[] responseBuffer = new byte[1024];
-      DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
-      try {
-          socket.receive(responsePacket);
-          System.out.print("Received Response: ");
-          printBufferHexDump(responseBuffer);
-          decodeResponse(queryID, node, responseBuffer);
-      } catch (IOException e) {
-          System.out.println("FAILED. IOException during receiving datagram.");
+          DatagramPacket queryPacket = new DatagramPacket(queryBuffer, queryBuffer.length, server, DEFAULT_DNS_PORT);
+          try {
+              socket.send(queryPacket);
+          } catch (IOException e) {
+              break;
+          }
+
+          byte[] responseBuffer = new byte[1024];
+          DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
+          try {
+              socket.receive(responsePacket);
+              //System.out.print("Received Response: ");
+              //printBufferHexDump(responseBuffer);
+              ArrayList<ResourceRecord> authNameServers = decodeResponse(queryID, node, responseBuffer);
+              if (authNameServers == null) {
+                  return null;
+              } else {
+                  ResourceRecord firstNameServer = authNameServers.get(0);
+                  return firstNameServer.getInetResult();
+              }
+          } catch (SocketTimeoutException e) {
+              timeOutCount++;
+          } catch (IOException e) {
+              break;
+          }
       }
+      return null;
     }
 
 
@@ -454,10 +547,10 @@ public class DNSLookupService {
      */
     private static void printResults(DNSNode node, Set<ResourceRecord> results) {
         if (results.isEmpty())
-            System.out.printf("%-30s %-5s %-8d %s\n", node.getHostName(),
+            System.out.printf("%-30s %-4s %-10d %s\n", node.getHostName(),
                     node.getType(), -1, "0.0.0.0");
         for (ResourceRecord record : results) {
-            System.out.printf("%-30s %-5s %-8d %s\n", node.getHostName(),
+            System.out.printf("%-30s %-4s %-10d %s\n", node.getHostName(),
                     node.getType(), record.getTTL(), record.getTextResult());
         }
     }
@@ -473,7 +566,7 @@ public class DNSLookupService {
           }
       }
       generatedQueryIDs[totalQueryCount++] = next;
-      System.out.println("Generated unique ID is " + next);
+      //System.out.println("Generated unique ID is " + next);
       return next;
     }
 }
