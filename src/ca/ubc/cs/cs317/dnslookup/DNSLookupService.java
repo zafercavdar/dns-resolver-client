@@ -25,7 +25,7 @@ public class DNSLookupService {
   private static Random random = new Random();
   private static int[] generatedQueryIDs = new int[65536];
   private static int totalQueryCount = 0;
-  private static int pointer = 0; // pointer for decoding query
+  private static int pointer = 0; // global pointer for decoding query
 
   /**
    * Main function, called when program is first invoked.
@@ -183,6 +183,7 @@ public class DNSLookupService {
       return Collections.emptySet();
     }
 
+    // If the information is in the cache, return it directly
     Set<ResourceRecord> cachedResults = cache.getCachedResults(node);
     if (!cachedResults.isEmpty()){
       return cachedResults;
@@ -219,7 +220,11 @@ public class DNSLookupService {
   }
 
   /**
-  Method to encode query as a message in the domain protocol
+  * Method to encode query as a message in the domain protocol
+  *
+  * @param queryID uniquely generated ID
+  * @param node Host name and record type to be used for the query.
+  * @return encoded query in a byte array
   **/
   private static byte[] encodeQuery(int queryID, DNSNode node) {
     byte[] queryBuffer = new byte[512];
@@ -254,22 +259,45 @@ public class DNSLookupService {
     }
     queryBuffer[ptr++] = (byte) 0; //end of QNAME
     int QTYPE = node.getType().getCode();
-    queryBuffer[ptr++] = (byte) 0;
-    queryBuffer[ptr++] = (byte) QTYPE;
+    queryBuffer[ptr++] = (byte) ((QTYPE >>> 8) & 0xff);
+    queryBuffer[ptr++] = (byte) (QTYPE & 0xff);
     int QCLASS = 1; // always Internet(IN)
     queryBuffer[ptr++] = (byte) 0;
     queryBuffer[ptr++] = (byte) QCLASS;
     return Arrays.copyOfRange(queryBuffer, 0, ptr);
   }
 
+  /**
+  * Helper function that finds int value of 2 bytes (short to int)
+  *
+  * @param b1 left byte
+  * @param b2 right byte
+  * @return 256 * b1 + b2 as integer
+  **/
   private static int getIntFromTwoBytes(byte b1, byte b2) {
     return ((b1 & 0xFF) << 8) + (b2 & 0xFF);
   }
 
+  /**
+  * Helper function that finds int value of 4 bytes (4 bytes to int)
+  *
+  * @param b1 first byte
+  * @param b2 second byte
+  * @param b3 third byte
+  * @param b4 fourth byte
+  * @return 16777216 * b1 + 65536 * b2 + 256 * b3 + b4 as integer
+  **/
   private static int getIntFromFourBytes(byte b1, byte b2, byte b3, byte b4) {
     return ((b1 & 0xFF) << 24) + ((b2 & 0xFF) << 16) + ((b3 & 0xFF) << 8) + (b4 & 0xFF);
   }
 
+  /**
+  * Recursively resolve the compressed name starting from ptr
+  *
+  * @param buffer byte array to be resolved
+  * @param ptr initial location to start resolving
+  * @return resolved compressed name
+  **/
   private static String getNameFromPointer(byte[] buffer, int ptr){
     String name = "";
     while(true) {
@@ -299,6 +327,16 @@ public class DNSLookupService {
     return name;
   }
 
+
+  /**
+  * Decode single RR in one of the following fields: answers, nameservers or
+  * additional information, put it to cache if it's answer or additional info
+  *
+  * @param responseBuffer received response from DNS server
+  * @param cacheRecord boolean value that indicates if the result should be
+  *                     cached or not
+  * @return decoded resource record
+  **/
   private static ResourceRecord decodeSingleRecord(byte[] responseBuffer, boolean cacheRecord){
     ResourceRecord record = null;
     String hostName = getNameFromPointer(responseBuffer, pointer);
@@ -306,6 +344,7 @@ public class DNSLookupService {
     int classCode = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
     long TTL = getIntFromFourBytes(responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++], responseBuffer[pointer++]);
     int RDATALength = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
+    boolean errorOccured = false;
     if (typeCode == 1) { // A IPv4
       String address = "";
       for (int j = 0; j < RDATALength; j++) {
@@ -319,7 +358,7 @@ public class DNSLookupService {
         record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
         verbosePrintResourceRecord(record, 0);
       } catch (UnknownHostException e){
-        System.out.println("FAILED, cannot getByName address");
+        errorOccured = true;
       }
     }
     else if (typeCode == 28) { // AAAA IPv6
@@ -336,46 +375,40 @@ public class DNSLookupService {
         record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, addr);
         verbosePrintResourceRecord(record, 0);
       } catch (UnknownHostException e){
-        System.out.println("FAILED, cannot getByName address");
+        errorOccured = true;
       }
     } else if (typeCode == 2 || typeCode == 5 || typeCode == 6) { // NS or CNAME or SOA
       String data = getNameFromPointer(responseBuffer, pointer);
       record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
       verbosePrintResourceRecord(record, 0);
     }
-    else {
+    else { // all other types are assumed to have value like NS or CNAME
       String data = getNameFromPointer(responseBuffer, pointer);
       record = new ResourceRecord(hostName, RecordType.getByCode(typeCode), TTL, data);
       verbosePrintResourceRecord(record, 0);
     }
 
-    if (cacheRecord) {
+    if (!errorOccured && cacheRecord) {
       cache.addResult(record);
     }
     return record;
   }
 
   /**
-  Method to decode response provided by DNS Server
+  * Method to decode response header
+  * This method calls decodeSingleRecord for fields next to header
+  * @param queryID generated unique query ID
+  * @param node Host name and record type to be used for the query.
+  * @param responseBuffer received response from the DNS server
+  * @return possible nameservers that can be used in the next iteration
   **/
   private static ArrayList<ResourceRecord> decodeResponse(int queryID, DNSNode node, byte[] responseBuffer) {
     int responseID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
-
-    if (queryID != responseID) {
-      System.out.println("FAILED. Response does not have same query ID.");
-      return null;
-    }
-
     int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
     int opCode = (responseBuffer[2] & 0x78) >>> 3; // get 2nd, 3rd, 4th and 5th bit
     int AA = (responseBuffer[2] & 0x04) >>> 2; // geth 6th
     int TC = (responseBuffer[2] & 0x02) >>> 1; // get 7th bit
     int RD = responseBuffer[2] & 0x01; // get 8th bit
-
-    if (QR != 1) {
-      System.out.println("FAILED. Received datagram is not response");
-      return null;
-    }
 
     if (verboseTracing)
       System.out.println("Response ID: " + responseID + " Authoritative = " + (AA == 1));
@@ -417,16 +450,8 @@ public class DNSLookupService {
       receivedQNAME += '.';
     }
     receivedQNAME = receivedQNAME.substring(0, receivedQNAME.length() - 1);
-    if (!node.getHostName().equals(receivedQNAME)) {
-      System.out.println("FAILED. Received QNAME is different than sent hostname. Received: " + receivedQNAME);
-      return null;
-    }
     int QTYPE = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
     int QCLASS = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
-    if (QCLASS != 1) {
-      System.out.println("FAILED. Received QCLASS code is " + QCLASS + " It's not IN(ternet)");
-      return null;
-    }
 
     ResourceRecord record = null;
 
@@ -456,7 +481,7 @@ public class DNSLookupService {
       }
     }
 
-    if (AA == 1){
+    if (AA == 1 || RCODE != 0){
       return null;
     } else { // AA = 0 case
       ArrayList<ResourceRecord> authNameServers = new ArrayList<ResourceRecord>();
@@ -492,7 +517,7 @@ public class DNSLookupService {
    *
    * @param node   Host name and record type to be used for the query.
    * @param server Address of the server to be used for the query.
-   */
+   **/
   private static InetAddress retrieveResultsFromServer(DNSNode node, InetAddress server) {
     int queryID = getNewUniqueQueryID();
     byte[] queryBuffer = encodeQuery(queryID, node);
@@ -515,6 +540,15 @@ public class DNSLookupService {
       DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
       try {
         socket.receive(responsePacket);
+        int responseID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
+        int QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
+
+        while (queryID != responseID || QR != 1) {
+          socket.receive(responsePacket);
+          responseID = getIntFromTwoBytes(responseBuffer[0],responseBuffer[1]);
+          QR = (responseBuffer[2] & 0x80) >>> 7; // get 1st bit
+        }
+
         ArrayList<ResourceRecord> authNameServers = decodeResponse(queryID, node, responseBuffer);
         if (authNameServers == null || authNameServers.isEmpty()) {
           return null;
@@ -531,7 +565,11 @@ public class DNSLookupService {
     return null;
   }
 
-
+  /**
+  * Prints given buffer array in hexadecimal base
+  *
+  * @param buffer byte array to be printed in hexadecimal base
+  **/
   private static void printBufferHexDump(byte[] buffer) {
     for (int x = 0 ; x < buffer.length; x++) {
       System.out.print(String.format("%02x ", buffer[x]));
@@ -555,17 +593,20 @@ public class DNSLookupService {
    */
   private static void printResults(DNSNode node, Set<ResourceRecord> results) {
     if (results.isEmpty())
-      System.out.printf("%-30s %-4s %-10d %s\n", node.getHostName(),
+      System.out.printf("%-30s %-5s %-8d %s\n", node.getHostName(),
           node.getType(), -1, "0.0.0.0");
     for (ResourceRecord record : results) {
-      System.out.printf("%-30s %-4s %-10d %s\n", node.getHostName(),
+      System.out.printf("%-30s %-5s %-8d %s\n", node.getHostName(),
           node.getType(), record.getTTL(), record.getTextResult());
     }
   }
 
   /**
-  * Returns a new and unique query ID
-  */
+  * Generates a random ID between 0 and 655536, if it's generated before,
+  * tries until generating a unique one
+  *
+  * @return a new and unique query ID
+  **/
   private static int getNewUniqueQueryID() {
     int next = random.nextInt(65536);
     for (int i = 0; i < totalQueryCount; i++){
