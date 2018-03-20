@@ -449,7 +449,7 @@ public class DNSLookupService {
       }
       receivedQNAME += '.';
     }
-    receivedQNAME = receivedQNAME.substring(0, receivedQNAME.length() - 1);
+    //receivedQNAME = receivedQNAME.substring(0, receivedQNAME.length() - 1);
     int QTYPE = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
     int QCLASS = getIntFromTwoBytes(responseBuffer[pointer++], responseBuffer[pointer++]);
 
@@ -465,7 +465,7 @@ public class DNSLookupService {
     if (verboseTracing)
       System.out.println("  Nameservers (" + NSCOUNT + ")");
     for (int i=0; i < NSCOUNT; i++) {
-      record = decodeSingleRecord(responseBuffer, false);
+      record = decodeSingleRecord(responseBuffer, true);
       if (record != null) {
         nameServers.add(record);
       }
